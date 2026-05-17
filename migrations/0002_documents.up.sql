@@ -1,6 +1,6 @@
 CREATE TABLE documents (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     object_key TEXT NOT NULL,
     filename TEXT NOT NULL,
     content_type TEXT NOT NULL,

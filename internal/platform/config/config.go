@@ -30,6 +30,7 @@ type HTTPConfig struct {
 
 type DependencyConfig struct {
 	PostgresAddr     string
+	PostgresDSN      string
 	RedisAddr        string
 	MinIOAddr        string
 	ReadinessTimeout time.Duration
@@ -105,6 +106,7 @@ func Load(defaultServiceName string) (Config, error) {
 		},
 		Dependencies: DependencyConfig{
 			PostgresAddr:     os.Getenv("POSTGRES_ADDR"),
+			PostgresDSN:      strings.TrimSpace(os.Getenv("POSTGRES_DSN")),
 			RedisAddr:        os.Getenv("REDIS_ADDR"),
 			MinIOAddr:        os.Getenv("MINIO_ADDR"),
 			ReadinessTimeout: readinessTimeout,

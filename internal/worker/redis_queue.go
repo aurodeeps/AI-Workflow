@@ -16,6 +16,7 @@ import (
 type RedisQueue struct {
 	addr        string
 	key         string
+	delayedKey  string
 	dialTimeout time.Duration
 }
 
@@ -27,6 +28,7 @@ func NewRedisQueue(addr, key string) *RedisQueue {
 	return &RedisQueue{
 		addr:        strings.TrimSpace(addr),
 		key:         key,
+		delayedKey:  key + ":delayed",
 		dialTimeout: 2 * time.Second,
 	}
 }
@@ -54,17 +56,24 @@ func (q *RedisQueue) Enqueue(ctx context.Context, job executor.AsyncJob) error {
 }
 
 func (q *RedisQueue) EnqueueAfter(ctx context.Context, job executor.AsyncJob, delay time.Duration) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("marshal delayed async job: %w", err)
 	}
 
-	go func() {
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
+	conn, reader, writer, err := q.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 
-		<-timer.C
-		_ = q.Enqueue(context.Background(), job)
-	}()
+	score := strconv.FormatInt(time.Now().Add(delay).UnixMilli(), 10)
+	if err := writeRESPArray(writer, "ZADD", q.delayedKey, score, string(payload)); err != nil {
+		return err
+	}
+	if _, err := readRESPInteger(reader); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -80,6 +89,10 @@ func (q *RedisQueue) Dequeue(ctx context.Context, wait time.Duration) (executor.
 		return executor.AsyncJob{}, false, err
 	}
 	defer conn.Close()
+
+	if err := q.promoteDueJobs(writer, reader); err != nil {
+		return executor.AsyncJob{}, false, err
+	}
 
 	if err := writeRESPArray(writer, "BRPOP", q.key, strconv.Itoa(timeoutSeconds)); err != nil {
 		return executor.AsyncJob{}, false, err
@@ -99,6 +112,43 @@ func (q *RedisQueue) Dequeue(ctx context.Context, wait time.Duration) (executor.
 	}
 
 	return job, true, nil
+}
+
+func (q *RedisQueue) promoteDueJobs(writer *bufio.Writer, reader *bufio.Reader) error {
+	now := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	for {
+		if err := writeRESPArray(writer, "ZRANGEBYSCORE", q.delayedKey, "-inf", now, "LIMIT", "0", "32"); err != nil {
+			return err
+		}
+
+		values, ok, err := readRESPArray(reader)
+		if err != nil {
+			return err
+		}
+		if !ok || len(values) == 0 {
+			return nil
+		}
+
+		for _, payload := range values {
+			if err := writeRESPArray(writer, "ZREM", q.delayedKey, payload); err != nil {
+				return err
+			}
+			removed, err := readRESPInteger(reader)
+			if err != nil {
+				return err
+			}
+			if removed == 0 {
+				continue
+			}
+
+			if err := writeRESPArray(writer, "LPUSH", q.key, payload); err != nil {
+				return err
+			}
+			if _, err := readRESPInteger(reader); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (q *RedisQueue) connect(ctx context.Context) (net.Conn, *bufio.Reader, *bufio.Writer, error) {

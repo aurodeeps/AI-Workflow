@@ -1,9 +1,11 @@
 CREATE TABLE workflow_runs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
     status TEXT NOT NULL,
     trigger_mode TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 0,
     input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     output_json JSONB,
     error_message TEXT NOT NULL DEFAULT '',
@@ -13,8 +15,8 @@ CREATE TABLE workflow_runs (
 );
 
 CREATE TABLE workflow_steps (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
     node_id TEXT NOT NULL,
     node_type TEXT NOT NULL,
     status TEXT NOT NULL,

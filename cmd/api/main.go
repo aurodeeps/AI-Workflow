@@ -13,6 +13,7 @@ import (
 	"workflow/internal/auth"
 	"workflow/internal/documents"
 	"workflow/internal/executor"
+	appbootstrap "workflow/internal/platform/bootstrap"
 	"workflow/internal/platform/config"
 	"workflow/internal/platform/health"
 	"workflow/internal/platform/logging"
@@ -44,26 +45,35 @@ func main() {
 		cfg.Dependencies.ReadinessTimeout,
 		buildDependencyCheckers(cfg)...,
 	)
-	tenantService := tenant.NewService(tenant.NewMemoryRepository(buildBootstrapTenants(cfg.Auth.BootstrapAPIKeys)))
-	authService := auth.NewService(
-		auth.NewMemoryRepository(buildBootstrapAPIKeys(cfg.Auth.BootstrapAPIKeys)),
-		tenantService,
-	)
+	bootstrapCtx := context.Background()
+	repositories, err := appbootstrap.OpenRepositories(bootstrapCtx, cfg)
+	if err != nil {
+		logger.Error("failed to initialize repositories", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := repositories.Close(); err != nil {
+			logger.Error("failed to close repositories", "error", err)
+		}
+	}()
+
+	tenantService := tenant.NewService(repositories.Tenants)
+	authService := auth.NewService(repositories.Auth, tenantService)
 	triggerControl := tenant.NewTriggerControl(cfg.Limits.TenantExecuteLimit, cfg.Limits.TenantExecuteWindow)
-	auditService := audit.NewService(audit.NewMemoryRepository())
+	auditService := audit.NewService(repositories.Audit)
 	objectStore, err := buildObjectStore(cfg)
 	if err != nil {
 		logger.Error("failed to initialize object storage", "error", err)
 		os.Exit(1)
 	}
 	documentService := documents.NewService(
-		documents.NewMemoryRepository(),
+		repositories.Documents,
 		objectStore,
 	)
-	workflowService := workflow.NewService(workflow.NewMemoryRepository())
+	workflowService := workflow.NewService(repositories.Workflows)
 	jobQueue := buildJobQueue(cfg)
 	executorService := executor.NewService(
-		executor.NewMemoryRepository(),
+		repositories.Executor,
 		workflowService,
 		documentService,
 		executor.NewMockLLMProvider(),
@@ -82,11 +92,13 @@ func main() {
 	defer stop()
 
 	errCh := make(chan error, 1)
-	go func() {
-		if err := backgroundWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- err
-		}
-	}()
+	if cfg.Dependencies.RedisAddr == "" {
+		go func() {
+			if err := backgroundWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				errCh <- err
+			}
+		}()
+	}
 	go func() {
 		logger.Info("api server starting", "addr", cfg.HTTP.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -157,39 +169,4 @@ func buildObjectStore(cfg config.Config) (documents.ObjectStore, error) {
 		cfg.Storage.S3.Bucket,
 		cfg.Storage.S3.UseSSL,
 	)
-}
-
-func buildBootstrapTenants(entries []config.BootstrapAPIKey) []tenant.Tenant {
-	seen := make(map[string]struct{}, len(entries))
-	tenants := make([]tenant.Tenant, 0, len(entries))
-
-	for _, entry := range entries {
-		if _, exists := seen[entry.TenantID]; exists {
-			continue
-		}
-
-		seen[entry.TenantID] = struct{}{}
-		tenants = append(tenants, tenant.Tenant{
-			ID:     entry.TenantID,
-			Name:   entry.TenantName,
-			Status: tenant.StatusActive,
-		})
-	}
-
-	return tenants
-}
-
-func buildBootstrapAPIKeys(entries []config.BootstrapAPIKey) []auth.APIKey {
-	keys := make([]auth.APIKey, 0, len(entries))
-	for _, entry := range entries {
-		keys = append(keys, auth.APIKey{
-			ID:        entry.APIKeyID,
-			TenantID:  entry.TenantID,
-			Label:     entry.Label,
-			Plaintext: entry.PlaintextKey,
-			Status:    auth.StatusActive,
-		})
-	}
-
-	return keys
 }
